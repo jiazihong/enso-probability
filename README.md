@@ -18,8 +18,11 @@ python enso_prob.py forecast --chart --json
 # 查看各模型的历史回测技能
 python enso_prob.py backtest --horizons 3,6,12
 
-# 生成可视化 HTML 报告（概率条形图 + ONI 历史曲线 + 回测技能表）
+# 生成可视化 HTML 报告（概率卡片 + 相似年份 + ONI 点预测 + 技能热力图 + 可靠性校准）
 python enso_prob.py report
+
+# 生成可供 GitHub Pages 托管的静态报告
+python enso_prob.py report --out docs/index.html
 
 # 运行内置自测
 python enso_prob.py selftest
@@ -27,6 +30,20 @@ python enso_prob.py selftest
 
 需要 Python 3.9+。没有网络时可直接使用仓库中的 `data/oni_cache.csv`；
 也可用 `--data-file` 指定本地 `oni.ascii.txt`，用 `--offline` 禁止联网。
+
+## 自动化（GitHub Actions + Pages）
+
+仓库内置月度自动化工作流 `.github/workflows/monthly-report.yml`：每月 8 日自动抓取最新 ONI、
+运行自测、把可视化报告生成到 `docs/index.html` 并提交回仓库。手动触发与本地等价命令：
+
+```bash
+python enso_prob.py update
+python enso_prob.py selftest
+python enso_prob.py report --out docs/index.html --no-bootstrap
+```
+
+在仓库 Settings → Pages 中选择 **Source = Deploy from a branch / main / /docs** 打开一次，
+之后 `https://<用户名>.github.io/<仓库名>/` 就会始终展示最新月度报告。
 
 ## 数据
 
@@ -83,14 +100,38 @@ BS = (1/3) Σ_i (p_i - y_i)²
 
 权重按正技能分比例分配；负技能模型直接剔除（权重 0），两模型均不优于气候态时退化为等权并提示。
 
-### 4. 不确定性区间
+### 4. 起报月分层与经验贝叶斯收缩
+
+两模型都在"全历史 pooled"与"同月起报 monthly"两个版本之间收缩：
+
+```
+p = λ·p_monthly + (1−λ)·p_pooled,   λ = n_month / (n_month + 24)
+```
+
+同月起报样本越多越倾向月度版本，样本少时回退到全历史估计——既捕捉季节锁相
+（春季预报障碍），又避免月度样本稀疏导致的方差膨胀。
+
+### 5. 相似年份透明化与 ONI 强度预测
+
+报告列出与当前轨迹最相似的 5 个历史时段及它们其后实际走向（`top_analogs`），
+并用近邻对 `t+h` 的 ONI 值做加权点预测（均值 + 加权 5%/95% 分位作为 90% 区间），
+给出未来 12 个月的强度曲线，而不只是三态概率。
+
+### 6. 不确定性区间
 
 90% 区间来自蒙特卡洛：转移模型按 Dirichlet 后验抽样，相似型按有效样本量
 `n_eff = (Σw)² / Σw²` 展开为 Dirichlet 后验抽样，两者按组合权重线性叠加后取 5%/95% 分位。
 
+### 7. 诊断面板
+
+- **技能热力图**：起报月 × 提前期的组合模型 Brier 技能分（绿=有技能，红=负技能），
+  直观呈现春季预报障碍；
+- **可靠性曲线**：把历史组合预测概率分桶，横轴=预测概率、纵轴=桶内实际频率，
+  点越贴近对角线概率越校准。
+
 ## 自测
 
-`python enso_prob.py selftest` 共 12 项，全部通过：
+`python enso_prob.py selftest` 共 16 项，全部通过：
 
 | 类别 | 检查 |
 | --- | --- |
@@ -98,10 +139,15 @@ BS = (1/3) Σ_i (p_i - y_i)²
 | 解析 | 列解析与时间排序 |
 | 参数回收 | 合成 AR(1) 序列上转移概率误差 `max|Δ| < 0.05`（n≈4500） |
 | 蒙特卡洛对照 | 相似型模型在合成序列上的 Brier 技能 > 0.02 |
-| 结构对称 | 翻转 ONI 符号后厄尔尼诺与拉尼娜概率严格互换（误差 0） |
+| 结构对称 | 翻转 ONI 符号后厄尔尼诺与拉尼娜概率严格互换（误差 0，含月度收缩版） |
 | 数值一致 | 概率归一、区间覆盖点估计 |
 | 边界 | 缺失值传播、过短序列、相位年龄递推 |
 | 回测 | 技能分与 Brier 分自洽 |
+| 月度分层 | 同相过滤抽样与独立计数一致 |
+| 近邻 | 无未来泄漏、距离升序、目标值对应 |
+| 强度预测 | 分位有序、均值量级合理 |
+| 热力图/校准 | 结构完整、每起点恰入一桶 |
+| 可视化组件 | SVG 曲线/校准图/热力表格片段生成正确 |
 
 ## 输出示例（2026-10 运行）
 
@@ -126,9 +172,11 @@ BS = (1/3) Σ_i (p_i - y_i)²
 
 ```
 enso-probability/
-├── enso_prob.py        # 主程序（含自测模块）
-├── data/oni_cache.csv  # ONI 数据快照（离线可用）
-├── output/             # 运行时生成（forecast.json / enso_report.html，已 gitignore）
+├── enso_prob.py                    # 主程序（含自测模块）
+├── data/oni_cache.csv              # ONI 数据快照（离线可用）
+├── output/                         # 运行时生成（forecast.json / enso_report.html，已 gitignore）
+├── docs/index.html                 # GitHub Pages 用静态报告（由自动化或 --out 生成）
+├── .github/workflows/              # 月度自动化工作流
 └── README.md
 ```
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 ENSO 概率分析工具 (ENSO Probability Tool)
 ==========================================
@@ -59,15 +58,13 @@ SEASONS = ("DJF", "JFM", "FMA", "MAM", "AMJ", "MJJ",
            "JJA", "JAS", "ASO", "SON", "OND", "NDJ")
 SEASON_IDX = {s: i for i, s in enumerate(SEASONS)}
 
-# 状态编码：-1 拉尼娜，0 中性，1 厄尔尼诺；数组下标 = 状态 + 1
 LA_NINA, NEUTRAL, EL_NINO = -1, 0, 1
 STATE_LABELS = {EL_NINO: "厄尔尼诺", NEUTRAL: "中性", LA_NINA: "拉尼娜"}
 STATE_LABELS_EN = {EL_NINO: "El Nino", NEUTRAL: "Neutral", LA_NINA: "La Nina"}
-STATE_ORDER = (EL_NINO, NEUTRAL, LA_NINA)  # 展示顺序
+STATE_ORDER = (EL_NINO, NEUTRAL, LA_NINA)
 
 ONI_THRESHOLD = 0.5
-EVENT_WINDOW = 5  # 官方规则：连续 5 个重叠三月
-
+EVENT_WINDOW = 5
 
 # --------------------------------------------------------------------------
 # 数据结构与解析
@@ -86,7 +83,6 @@ class Obs:
     @property
     def month_index(self) -> int:
         return self.year * 12 + SEASON_IDX[self.season]
-
 
 def parse_oni_text(text: str) -> List[Obs]:
     """解析 ONI ASCII 表（列：SEAS YR TOTAL ANOM），忽略注释与表头。"""
@@ -108,7 +104,6 @@ def parse_oni_text(text: str) -> List[Obs]:
     obs.sort(key=lambda o: o.month_index)
     return obs
 
-
 def fetch_oni_text(timeout: float = 25.0) -> str:
     req = urllib.request.Request(
         DATA_URL,
@@ -117,13 +112,11 @@ def fetch_oni_text(timeout: float = 25.0) -> str:
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "replace")
 
-
 def save_cache(text: str) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     header = f"# fetched={stamp} source={DATA_URL}\n"
     CACHE_FILE.write_text(header + text, encoding="utf-8")
-
 
 def load_obs(refresh: bool = False, data_file: Optional[str] = None,
              allow_network: bool = True) -> Tuple[List[Obs], str]:
@@ -148,7 +141,7 @@ def load_obs(refresh: bool = False, data_file: Optional[str] = None,
                 save_cache(text)
                 return obs, "NOAA CPC 在线数据（已写入缓存）"
             print("[警告] 在线数据条数异常，未写入缓存。", file=sys.stderr)
-        except Exception as exc:  # 网络异常时退回缓存
+        except Exception as exc:
             print(f"[警告] 在线抓取失败：{exc}", file=sys.stderr)
 
     if CACHE_FILE.exists():
@@ -163,7 +156,6 @@ def load_obs(refresh: bool = False, data_file: Optional[str] = None,
         "或用 --data-file 指定本地 oni.ascii.txt。"
     )
 
-
 # --------------------------------------------------------------------------
 # 基础统计
 # --------------------------------------------------------------------------
@@ -171,13 +163,11 @@ def load_obs(refresh: bool = False, data_file: Optional[str] = None,
 def _mean(xs: Sequence[float]) -> float:
     return sum(xs) / len(xs)
 
-
 def _stdev(xs: Sequence[float]) -> float:
     if len(xs) < 2:
         return 0.0
     m = _mean(xs)
     return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
-
 
 def classify_states(anoms: Sequence[Optional[float]],
                     window: int = EVENT_WINDOW) -> List[Optional[int]]:
@@ -196,7 +186,6 @@ def classify_states(anoms: Sequence[Optional[float]],
             out[i] = NEUTRAL
     return out
 
-
 def phase_ages(states: Sequence[Optional[int]]) -> List[int]:
     """每个时点所处状态的已持续月数（O(n) 预计算）。"""
     ages = [0] * len(states)
@@ -209,7 +198,6 @@ def phase_ages(states: Sequence[Optional[int]]) -> List[int]:
             ages[i] = 1
     return ages
 
-
 def _age_bucket(age: int) -> int:
     if age <= 3:
         return 0
@@ -219,12 +207,10 @@ def _age_bucket(age: int) -> int:
         return 2
     return 3
 
-
 def _brier(p: Sequence[float], state: int) -> float:
     y = [0.0, 0.0, 0.0]
     y[state + 1] = 1.0
     return sum((p[i] - y[i]) ** 2 for i in range(3)) / 3.0
-
 
 # --------------------------------------------------------------------------
 # 模型 1：状态转移（含相位年龄分层 + Dirichlet 先验）
@@ -235,20 +221,26 @@ def transition_distribution(states: Sequence[Optional[int]],
                             t_now: int,
                             horizon: int,
                             prior_strength: float = 4.0,
-                            age_boost: float = 0.3) -> Tuple[List[float], List[float], float]:
+                            age_boost: float = 0.3,
+                            season: Optional[int] = None
+                            ) -> Tuple[List[float], List[float], float]:
     """返回 (三状态概率, Dirichlet 后验参数, 有效转移样本量)。
 
     age_boost=1.0 表示不使用相位年龄分层；<1 表示非同龄样本降权。
+    season 非 None 时仅统计起报月相相同的样本（0=DJF, ..., 11=NDJ），
+    用于按日历月分层以缓解"春季预报障碍"。
     """
     cur = states[t_now]
-    counts = [0.0, 0.0, 0.0]      # 同龄样本
-    marg = [0.0, 0.0, 0.0]        # 无条件边际（用作先验）
+    counts = [0.0, 0.0, 0.0]
+    marg = [0.0, 0.0, 0.0]
     bucket_now = _age_bucket(ages[t_now]) if cur is not None else -1
 
     n_pairs = len(states) - horizon
     for t in range(n_pairs):
         if t + horizon > t_now:
             break
+        if season is not None and t % 12 != season:
+            continue
         s0, s1 = states[t], states[t + horizon]
         if s0 is None or s1 is None:
             continue
@@ -261,12 +253,10 @@ def transition_distribution(states: Sequence[Optional[int]],
     marg_p = [m / total_m for m in marg] if total_m > 0 else [1.0 / 3] * 3
     prior = [prior_strength * x + 1e-6 for x in marg_p]
 
-    # Dirichlet 后验参数 = 观测计数 + 先验参数
     posterior = [counts[i] + prior[i] for i in range(3)]
     denom = sum(posterior)
     p = [x / denom for x in posterior]
     return p, posterior, sum(counts)
-
 
 # --------------------------------------------------------------------------
 # 模型 2：历史相似型（轨迹近邻 + 高斯核）
@@ -278,9 +268,13 @@ def analog_distribution(anoms: Sequence[Optional[float]],
                         horizon: int,
                         window: int = 6,
                         min_candidates: int = 20,
-                        bw_floor: float = 0.25
+                        bw_floor: float = 0.25,
+                        season: Optional[int] = None
                         ) -> Optional[Tuple[List[float], List[float], float]]:
-    """返回 (三状态概率, 各近邻权重, Kish 有效样本量)；样本不足时返回 None。"""
+    """返回 (三状态概率, 各近邻权重, Kish 有效样本量)；样本不足时返回 None。
+
+    season 非 None 时仅使用起报月相相同的近邻（按月分层）。
+    """
     n = len(states)
     if t_now - window + 1 < 0:
         return None
@@ -293,6 +287,8 @@ def analog_distribution(anoms: Sequence[Optional[float]],
     for t in range(window - 1, n - horizon):
         if t + horizon > t_now:
             break
+        if season is not None and t % 12 != season:
+            continue
         w = anoms[t - window + 1: t + 1]
         if any(v is None for v in w):
             continue
@@ -306,7 +302,6 @@ def analog_distribution(anoms: Sequence[Optional[float]],
     if len(dists) < min_candidates:
         return None
 
-    # Silverman 带宽（取历史距离的标准差），并设下限避免退化
     bw = max(bw_floor, 1.06 * _stdev(dists) * len(dists) ** (-0.2))
     weights = [math.exp(-0.5 * (d / bw) ** 2) for d in dists]
 
@@ -319,6 +314,209 @@ def analog_distribution(anoms: Sequence[Optional[float]],
     n_eff = (sum(weights) ** 2) / sum(w * w for w in weights)
     return p, weights, n_eff
 
+# --------------------------------------------------------------------------
+# 进阶模块：近邻透明化 / 强度预测 / 月度收缩 / 技能热力图 / 概率校准
+# --------------------------------------------------------------------------
+
+def _silverman_bw(dists: Sequence[float], floor: float = 0.25) -> float:
+    return max(floor, 1.06 * _stdev(dists) * len(dists) ** (-0.2))
+
+def _neighbors(anoms: Sequence[Optional[float]], t_now: int,
+               window: int, horizon: int, season: Optional[int] = None
+               ) -> List[Tuple[int, float, Optional[float]]]:
+    """返回 (t, 距离, h 个月后 ONI 值) 列表，按距离升序。t+h 恒 <= t_now。"""
+    q = anoms[t_now - window + 1: t_now + 1]
+    if any(v is None for v in q):
+        return []
+    out = []
+    n = len(anoms)
+    for t in range(window - 1, n - horizon):
+        if t + horizon > t_now:
+            break
+        if season is not None and t % 12 != season:
+            continue
+        w = anoms[t - window + 1: t + 1]
+        if any(v is None for v in w):
+            continue
+        d2 = sum((a - b) ** 2 for a, b in zip(q, w)) / window
+        out.append((t, math.sqrt(d2), anoms[t + horizon]))
+    out.sort(key=lambda x: x[1])
+    return out
+
+def top_analogs(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
+                states: Sequence[Optional[int]], t_now: int,
+                horizon: int, window: int = 6, k: int = 5) -> List[dict]:
+    """最相似历史年份：当前轨迹的近邻及其 h 个月后的实际走向。"""
+    nn = _neighbors(anoms, t_now, window, horizon)
+    result = []
+    for t, d, v in nn[:k]:
+        idx = states[t + horizon] if t + horizon < len(states) else None
+        result.append({
+            "label": obs[t].label,
+            "start": obs[t].label,
+            "target": obs[t + horizon].label if t + horizon < len(obs) else "",
+            "distance": d,
+            "target_oni": v,
+            "state": idx,
+        })
+    return result
+
+def oni_point_forecast(anoms: Sequence[Optional[float]], t_now: int,
+                       horizon: int, window: int = 6, k_nearest: int = 40
+                       ) -> Optional[dict]:
+    """相似型加权的未来 ONI 点预测（加权均值 + 加权 5/95 分位）。"""
+    nn = _neighbors(anoms, t_now, window, horizon)[:k_nearest]
+    if len(nn) < 12:
+        return None
+    dists = [d for _, d, _ in nn]
+    bw = _silverman_bw(dists)
+    weights = [math.exp(-0.5 * (d / bw) ** 2) for d in dists]
+    pairs = sorted([(v, w) for (_, _, v), w in zip(nn, weights) if v is not None],
+                   key=lambda x: x[0])
+    if not pairs:
+        return None
+    vals = [v for v, _ in pairs]
+    ws = [w for _, w in pairs]
+    wsum = sum(ws)
+    mean = sum(v * w for v, w in pairs) / wsum
+    var = sum(w * (v - mean) ** 2 for v, w in pairs) / wsum
+    sd = math.sqrt(var)
+
+    def wquantile(qq):
+        target = qq * wsum
+        acc = 0.0
+        for v, w in pairs:
+            acc += w
+            if acc >= target:
+                return v
+        return vals[-1]
+
+    return {
+        "mean": mean,
+        "sd": sd,
+        "q05": wquantile(0.05),
+        "q95": wquantile(0.95),
+        "n_eff": wsum ** 2 / sum(w * w for w in ws),
+        "n": len(pairs),
+    }
+
+def monthly_shrunk_components(anoms: Sequence[Optional[float]],
+                              states: Sequence[Optional[int]],
+                              ages: Sequence[int],
+                              t_now: int, horizon: int,
+                              k_lambda: float = 24.0) -> dict:
+    """按起报月分层 + 经验贝叶斯收缩的最终组件。
+
+    对转移模型与相似型：分别估计"全历史 pooled"与"同月起报 monthly"两个版本，
+    按月度有效样本量收缩混合 p = λ·p_month + (1-λ)·p_pooled，λ = n/(n+k)。
+    返回 dict(p_trans, alpha, p_analog, n_analog, lam, note)，供组合预测与区间抽样使用。
+    """
+    season = t_now % 12
+
+    pm_all, am_all, nm_all = transition_distribution(states, ages, t_now, horizon)
+    pm_mo, am_mo, nm_mo = transition_distribution(
+        states, ages, t_now, horizon, season=season)
+    lam_t = nm_mo / (nm_mo + k_lambda) if nm_mo > 0 else 0.0
+    p_trans = [lam_t * pm_mo[i] + (1 - lam_t) * pm_all[i] for i in range(3)]
+
+    an_all = analog_distribution(anoms, states, t_now, horizon)
+    an_mo = analog_distribution(anoms, states, t_now, horizon, season=season)
+    if an_all is None:
+        p_analog, an_weights, n_eff, lam_a = None, None, 0.0, 0.0
+    else:
+        pa_all, wa_all, neff_all = an_all
+        lam_a = 0.0
+        p_analog = list(pa_all)
+        an_weights = wa_all
+        n_eff = neff_all
+        if an_mo is not None:
+            pa_mo, wa_mo, neff_mo = an_mo
+            lam_a = neff_mo / (neff_mo + k_lambda)
+            p_analog = [lam_a * pa_mo[i] + (1 - lam_a) * pa_all[i] for i in range(3)]
+            an_weights = wa_mo
+            n_eff = lam_a * neff_mo + (1 - lam_a) * neff_all
+
+    neff_final = max(12.0, (nm_all + n_eff * 0.5))
+    alpha = [max(p_trans[i] * neff_final, 1e-6) for i in range(3)]
+
+    return {
+        "p_trans": p_trans,
+        "alpha": alpha,
+        "p_analog": p_analog,
+        "analog_weights": an_weights,
+        "n_analog_eff": n_eff if p_analog is not None else 0.0,
+        "lam": (lam_t, lam_a),
+        "n_month_trans": nm_mo,
+    }
+
+def skill_heatmap(anoms: Sequence[Optional[float]],
+                  states: Sequence[Optional[int]],
+                  ages: Sequence[int],
+                  horizons: Sequence[int] = (3, 6, 9, 12),
+                  step: int = 3, min_train: int = 240) -> dict:
+    """技能热力图：起报月（12 个重叠三月）× 提前期 的月度收缩组合模型技能分。"""
+    heat = {m: {} for m in range(12)}
+    for m in range(12):
+        for h in horizons:
+            bs_m, bs_c = [], []
+            for t in range(min_train, len(states) - h, step):
+                if t % 12 != m:
+                    continue
+                truth = states[t + h]
+                if truth is None or states[t] is None:
+                    continue
+                comp = monthly_shrunk_components(anoms, states, ages, t, h)
+                p_mix = _mix_p(comp)
+                bs_m.append(_brier(p_mix, truth))
+                bs_c.append(_brier(climatology_distribution(states, t, h), truth))
+            m_b = _mean(bs_m) if bs_m else None
+            c_b = _mean(bs_c) if bs_c else None
+            heat[m][h] = (1 - m_b / c_b) if (m_b is not None and c_b) else None
+    return heat
+
+def _mix_p(comp: dict) -> List[float]:
+    """按月收缩组件按技能权组合（热力图/校准内部使用等权近似）。"""
+    if comp["p_analog"] is None:
+        return list(comp["p_trans"])
+    return [0.5 * comp["p_trans"][i] + 0.5 * comp["p_analog"][i] for i in range(3)]
+
+def compute_calibration(anoms: Sequence[Optional[float]],
+                        states: Sequence[Optional[int]],
+                        ages: Sequence[int],
+                        horizon: int,
+                        model: str = "mix",
+                        step: int = 3, min_train: int = 240) -> List[dict]:
+    """可靠性曲线桶：把预测概率按月收缩组合分桶，统计桶内实际频率。"""
+    edges = [0.0, 0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.0]
+    bins = [(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+    buckets = [{"lo": lo, "hi": hi, "pred": [], "obs": []} for lo, hi in bins]
+
+    for t in range(min_train, len(states) - horizon, step):
+        truth = states[t + horizon]
+        if truth is None or states[t] is None:
+            continue
+        comp = monthly_shrunk_components(anoms, states, ages, t, horizon)
+        if model == "mix":
+            p = _mix_p(comp)
+        elif model == "transition":
+            p = comp["p_trans"]
+        else:
+            continue
+        pt = p[truth + 1]
+        for b in buckets:
+            if b["lo"] <= pt < b["hi"] or (pt >= 1.0 and b is buckets[-1]):
+                b["pred"].append(pt)
+                b["obs"].append(1.0)
+                break
+    out = []
+    for b in buckets:
+        n = len(b["pred"])
+        out.append({
+            "lo": b["lo"], "hi": b["hi"], "n": n,
+            "mean_pred": _mean(b["pred"]) if n else None,
+            "freq_obs": _mean(b["obs"]) if n else None,
+        })
+    return out
 
 # --------------------------------------------------------------------------
 # 气候态基线
@@ -343,7 +541,6 @@ def climatology_distribution(states: Sequence[Optional[int]],
         return [1.0 / 3] * 3
     return [c / total for c in counts]
 
-
 # --------------------------------------------------------------------------
 # 不确定性：Dirichlet / 近邻 bootstrap 混合抽样
 # --------------------------------------------------------------------------
@@ -352,7 +549,6 @@ def _sample_dirichlet(alpha: Sequence[float], rng: random.Random) -> List[float]
     g = [rng.gammavariate(max(a, 1e-9), 1.0) for a in alpha]
     s = sum(g)
     return [x / s for x in g] if s > 0 else [1.0 / 3] * 3
-
 
 def _quantile(sorted_vals: Sequence[float], q: float) -> float:
     if not sorted_vals:
@@ -366,7 +562,6 @@ def _quantile(sorted_vals: Sequence[float], q: float) -> float:
         return sorted_vals[lo]
     frac = pos - lo
     return sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac
-
 
 def simulate_intervals(p_analog: Optional[Sequence[float]],
                        analog_n_eff: float,
@@ -405,7 +600,6 @@ def simulate_intervals(p_analog: Optional[Sequence[float]],
         out.append((_quantile(vals, 0.05), _quantile(vals, 0.95)))
     return out
 
-
 # --------------------------------------------------------------------------
 # 组合预测
 # --------------------------------------------------------------------------
@@ -440,7 +634,6 @@ def blend_forecast(p_trans: Sequence[float],
         "n_eff": n_eff,
     }
 
-
 # --------------------------------------------------------------------------
 # 回测：模型技能与自适应权重
 # --------------------------------------------------------------------------
@@ -448,7 +641,6 @@ def blend_forecast(p_trans: Sequence[float],
 def _fingerprint(anoms: Sequence[Optional[float]]) -> str:
     payload = "|".join(f"{x:.3f}" for x in anoms)
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
-
 
 def compute_skills(anoms: Sequence[Optional[float]],
                    states: Sequence[Optional[int]],
@@ -510,7 +702,6 @@ def compute_skills(anoms: Sequence[Optional[float]],
         cache_file.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     return result
 
-
 def skill_weights(skills: dict) -> Tuple[Tuple[float, float], Optional[str]]:
     """按技能分分配权重；负技能模型直接剔除，两者都不优于气候态时退化为等权。"""
     st, sa = skills.get("skill_trans"), skills.get("skill_analog")
@@ -525,7 +716,6 @@ def skill_weights(skills: dict) -> Tuple[Tuple[float, float], Optional[str]]:
         return (0.5, 0.5), "两模型均未跑赢气候态，退化为等权"
     return (st / (st + sa), sa / (st + sa)), None
 
-
 # --------------------------------------------------------------------------
 # 输出
 # --------------------------------------------------------------------------
@@ -533,22 +723,18 @@ def skill_weights(skills: dict) -> Tuple[Tuple[float, float], Optional[str]]:
 def _pct(x: float) -> str:
     return f"{x * 100:5.1f}%"
 
-
 def _dwidth(s: str) -> int:
     """终端显示宽度（中文/全角字符按 2 列计）。"""
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
-
 
 def _pad(s: str, width: int, right: bool = False) -> str:
     gap = " " * max(0, width - _dwidth(s))
     return gap + s if right else s + gap
 
-
 def _bar(p: float, width: int = 20) -> str:
     k = int(round(p * width))
     k = max(0, min(width, k))
     return "#" * k + "-" * (width - k)
-
 
 def _oneline(label: str, p: float, lo: Optional[float], hi: Optional[float]) -> str:
     ci = ""
@@ -556,12 +742,10 @@ def _oneline(label: str, p: float, lo: Optional[float], hi: Optional[float]) -> 
         ci = f"  [90%CI {lo * 100:5.1f}% - {hi * 100:5.1f}%]"
     return f"  {label:<6s} {_pct(p)}{ci}  {_bar(p)}"
 
-
 def horizon_label(obs: Sequence[Obs], t_now: int, horizon: int) -> str:
     mi = obs[t_now].month_index + horizon
     year, m = divmod(mi, 12)
     return f"{year} {SEASONS[m]}"
-
 
 def _trailing_run(anoms: Sequence[Optional[float]], t_now: int,
                   above: bool, threshold: float = ONI_THRESHOLD) -> int:
@@ -577,7 +761,6 @@ def _trailing_run(anoms: Sequence[Optional[float]], t_now: int,
         else:
             break
     return k
-
 
 def print_header(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
                  states: Sequence[Optional[int]], ages: Sequence[int],
@@ -597,7 +780,6 @@ def print_header(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
     print(f"  已持续     {ages[t_now]} 个月")
     print(f"  判定规则   ONI 连续 {EVENT_WINDOW} 个重叠三月 >= +0.5 为厄尔尼诺，<= -0.5 为拉尼娜")
 
-    # 阈值临近提示：官方规则有 5 个月滞后，当前状态常落后于实际演变
     if state == NEUTRAL:
         pos = _trailing_run(anoms, t_now, above=True)
         neg = _trailing_run(anoms, t_now, above=False)
@@ -610,7 +792,6 @@ def print_header(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
     recent = [f"{o.anom:+.1f}" for o in obs[-6:]]
     print(f"  近 6 个月  {', '.join(recent)}")
     print()
-
 
 def run_forecast(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
                  states: Sequence[Optional[int]], ages: Sequence[int],
@@ -639,28 +820,48 @@ def run_forecast(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
         print(f" 未来 {h:2d} 个月（{horizon_label(obs, t_now, h)} 前后）的概率")
         print("-" * 66)
 
-        p_trans, alpha, n_trans = transition_distribution(states, ages, t_now, h)
-        analog = analog_distribution(anoms, states, t_now, h)
+        comp = monthly_shrunk_components(anoms, states, ages, t_now, h)
         skills = compute_skills(anoms, states, ages, h)
         w, note = skill_weights(skills)
-        if analog is None:
-            w = (1.0, 0.0)
+        analog_arg = None
+        if comp["p_analog"] is not None:
+            analog_arg = (comp["p_analog"], comp["analog_weights"],
+                          comp["n_analog_eff"])
+            if comp["n_analog_eff"] < 5:
+                w = (1.0, 0.0)
 
-        fc = blend_forecast(p_trans, analog, w, simulate=do_sim, alpha=alpha)
+        fc = blend_forecast(comp["p_trans"], analog_arg, w,
+                            simulate=do_sim, alpha=comp["alpha"])
         intervals = fc["interval"]
 
         for s in STATE_ORDER:
-            i = s + 1  # 概率数组下标 = 状态编码 + 1
+            i = s + 1
             lo, hi = intervals[i] if intervals else (None, None)
             print(_oneline(STATE_LABELS[s], fc["p"][i], lo, hi))
 
         wt, wa = fc["blend"]
         print()
         print(f"  模型权重   转移模型 {wt:.2f} / 历史相似型 {wa:.2f}")
+        lam_t, lam_a = comp["lam"]
+        print(f"  月度收缩   λ(转移)={lam_t:.2f} / λ(相似)={lam_a:.2f}  (1=完全按同月起报)")
         sk_t, sk_a = skills["skill_trans"], skills["skill_analog"]
         sk_txt = f"转移 {sk_t:+.3f}" if sk_t is not None else "转移 n/a"
         sk_txt += f" / 相似 {sk_a:+.3f}" if sk_a is not None else " / 相似 n/a"
         print(f"  回测技能   {sk_txt}   (Brier 技能分, 滚动回测 n={skills['n_eval']})")
+
+        point = oni_point_forecast(anoms, t_now, h)
+        if point is not None:
+            print(f"  ONI 预测   {point['mean']:+.2f} "
+                  f"[90%CI {point['q05']:+.2f} ~ {point['q95']:+.2f}] "
+                  f"(近邻 {point['n']} 个, 有效 {point['n_eff']:.0f})")
+        analogs = top_analogs(obs, anoms, states, t_now, h)
+        if analogs:
+            parts = []
+            for a in analogs[:3]:
+                st = STATE_LABELS[a["state"]] if a["state"] is not None else "?"
+                v = f"{a['target_oni']:+.1f}" if a["target_oni"] is not None else "-"
+                parts.append(f"{a['target']}({st},{v})")
+            print(f"  相似年份   " + " · ".join(parts))
         if note:
             print(f"  提示       {note}")
         print()
@@ -675,6 +876,9 @@ def run_forecast(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
             "interval_la_nina": list(intervals[0]) if intervals else None,
             "weights": {"transition": wt, "analog": wa},
             "skill": {"transition": sk_t, "analog": sk_a},
+            "monthly_shrink": {"lam_transition": lam_t, "lam_analog": lam_a},
+            "oni_point": point,
+            "top_analogs": analogs,
         }
 
     print("=" * 66)
@@ -693,7 +897,6 @@ def run_forecast(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
         print(f"\n已写入 {path}")
 
     return result
-
 
 def print_oni_chart(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
                     months: int = 72, width: int = 24) -> None:
@@ -714,7 +917,6 @@ def print_oni_chart(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
             bar = " " * (width - k) + "#" * k + "|"
         print(f"{o.label:<11s} {bar}")
 
-
 # --------------------------------------------------------------------------
 # 自测
 # --------------------------------------------------------------------------
@@ -730,12 +932,10 @@ def _synthetic_ar1(n: int = 6000, phi: float = 0.9, sd: float = 0.8,
         out.append(x)
     return out
 
-
 def selftest(verbose: bool = True) -> bool:
     """内置自测：规则、参数回收、蒙特卡洛对照、对称性、边界条件。"""
     checks: List[Tuple[str, bool, str]] = []
 
-    # 1. 官方规则：连续 5 个月 >= 0.5
     s = classify_states([0.6] * 5)
     checks.append(("规则-厄尔尼诺判定",
                    s[4] == EL_NINO and s[3] is None,
@@ -745,7 +945,6 @@ def selftest(verbose: bool = True) -> bool:
     s = classify_states([-0.7] * 5)
     checks.append(("规则-拉尼娜判定", s[4] == LA_NINA, f"state={s[4]}"))
 
-    # 2. 解析器
     sample = (" SEAS  YR   TOTAL   ANOM\n"
               "  DJF 1950  25.01  -1.32\n"
               "  JFM 1950  25.36  -1.20\n"
@@ -754,7 +953,6 @@ def selftest(verbose: bool = True) -> bool:
     checks.append(("解析器-列与排序", len(parsed) == 2 and parsed[0].season == "DJF",
                    f"n={len(parsed)}"))
 
-    # 3. 合成 AR(1) 上的转移概率参数回收
     synth = _synthetic_ar1(n=6000)
     st = classify_states(synth)
     ages = phase_ages(st)
@@ -778,7 +976,6 @@ def selftest(verbose: bool = True) -> bool:
     checks.append(("转移模型-经验分布回收", total > 100 and err < 0.05,
                    f"n={total}, max|Δ|={err:.4f}"))
 
-    # 4. 蒙特卡洛对照：相似型模型应优于气候态
     n_eval = 60
     bs_a, bs_c = [], []
     for t in range(len(st) - 120, len(st) - h, 2):
@@ -794,7 +991,6 @@ def selftest(verbose: bool = True) -> bool:
                    len(bs_a) >= n_eval * 0.5 and skill > 0.02,
                    f"n={len(bs_a)}, skill={skill:+.4f}"))
 
-    # 5. 结构对称性：翻转 ONI 符号，厄尔尼诺与拉尼娜概率互换
     flipped = [-v if v is not None else None for v in synth]
     st_f = classify_states(flipped)
     ages_f = phase_ages(st_f)
@@ -807,14 +1003,12 @@ def selftest(verbose: bool = True) -> bool:
     sym_err = max(abs(f1[2] - f2[0]), abs(f1[0] - f2[2]), abs(f1[1] - f2[1]))
     checks.append(("对称性-符号翻转", sym_err < 1e-12, f"max|Δ|={sym_err:.3e}"))
 
-    # 6. 概率归一 + 区间包住点估计
     fc = blend_forecast(p1, an1, (0.5, 0.5), simulate=True, alpha=a1, n_sim=800)
     total_p = sum(fc["p"])
     lo_ok = all(fc["interval"][i][0] <= fc["p"][i] <= fc["interval"][i][1] for i in range(3))
     checks.append(("概率归一/区间覆盖", abs(total_p - 1) < 1e-9 and lo_ok,
                    f"sum={total_p:.6f}, covered={lo_ok}"))
 
-    # 7. 边界条件：缺失值与过短序列
     holey = list(synth[:200])
     holey[100] = None
     st_h = classify_states(holey)
@@ -824,7 +1018,6 @@ def selftest(verbose: bool = True) -> bool:
     short = classify_states([0.6, 0.7])
     checks.append(("边界-过短序列", all(v is None for v in short), f"states={short}"))
 
-    # 8. 相位年龄单调性
     ages_ok = all(
         (ages[i] == ages[i - 1] + 1) if (i > 0 and st[i] is not None and st[i] == st[i - 1])
         else True
@@ -832,7 +1025,6 @@ def selftest(verbose: bool = True) -> bool:
     )
     checks.append(("相位年龄-递推正确", ages_ok, f"max_age={max(ages)}"))
 
-    # 9. 回测技能自洽：skill = 1 - BS / BS_clim
     skills = compute_skills(synth, st, ages, 6, step=12, min_train=240, use_cache=False)
     consistent = (
         skills["skill_trans"] is not None
@@ -841,6 +1033,72 @@ def selftest(verbose: bool = True) -> bool:
     )
     checks.append(("回测-技能自洽", consistent,
                    f"Brier trans={skills['brier_trans']:.4f}, clim={skills['brier_clim']:.4f}"))
+
+    season_chk = 2
+    _, _, n_mo = transition_distribution(st, ages, t_now, 3, season=season_chk)
+    cnt_mo = 0.0
+    cur_s = st[t_now]
+    bucket_now = _age_bucket(ages[t_now]) if cur_s is not None else -1
+    for t in range(len(st) - 3):
+        if t + 3 > t_now:
+            break
+        if t % 12 != season_chk:
+            continue
+        s0, s1 = st[t], st[t + 3]
+        if s0 is None or s1 is None or cur_s is None or s0 != cur_s:
+            continue
+        cnt_mo += 1.0 if _age_bucket(ages[t]) == bucket_now else 0.3
+    checks.append(("月度分层-同相过滤", abs(cnt_mo - n_mo) < 1e-9,
+                   f"独立计数={cnt_mo:.1f}, 模型={n_mo:.1f}"))
+
+    nn = _neighbors(synth, t_now, window=6, horizon=3)
+    nn_ok = (len(nn) > 50 and all(t + 3 <= t_now for t, _, _ in nn)
+             and all(d0 <= d1 for (_, d0, _), (_, d1, _) in zip(nn, nn[1:]))
+             and all(v == synth[t + 3] for t, _, v in nn[:20]))
+    checks.append(("近邻-无泄漏/排序", nn_ok, f"近邻数={len(nn)}"))
+
+    pt_fc = oni_point_forecast(synth, t_now, 3)
+    pt_ok = (pt_fc is not None and pt_fc["q05"] <= pt_fc["mean"] <= pt_fc["q95"]
+             and abs(pt_fc["mean"]) <= 3.5)
+    checks.append(("强度预测-分位自洽", pt_ok,
+                   f"mean={pt_fc['mean']:+.2f} q05={pt_fc['q05']:+.2f} q95={pt_fc['q95']:+.2f}"))
+
+    st300 = classify_states([synth[i] for i in range(300)])
+    ages300 = phase_ages(st300)
+    heat = skill_heatmap([synth[i] for i in range(300)], st300, ages300,
+                         horizons=(3,), step=6, min_train=60)
+    heat_vals = [v for m in range(12) for v in heat[m].values()]
+    heat_ok = (set(heat.keys()) == set(range(12))
+               and any(v is not None for v in heat_vals)
+               and all(v is None or -1.0 <= v <= 1.0 for v in heat_vals))
+    checks.append(("热力图-结构/取值", heat_ok, f"有效格点 {sum(v is not None for v in heat_vals)}/12"))
+
+    cal = compute_calibration([synth[i] for i in range(300)], st300, ages300, 3,
+                              step=6, min_train=60)
+    n_eval = sum(1 for t in range(60, 300 - 3, 6)
+                 if st300[t] is not None and st300[t + 3] is not None)
+    cal_ok = sum(b["n"] for b in cal) == n_eval and all(
+        b["mean_pred"] is None or 0.0 <= b["mean_pred"] <= 1.0 for b in cal)
+    checks.append(("校准-桶覆盖完整", cal_ok, f"桶总和={sum(b['n'] for b in cal)}, 应={n_eval}"))
+
+    fl300 = [-synth[i] for i in range(300)]
+    stf300 = classify_states(fl300)
+    agesf300 = phase_ages(stf300)
+    tv = next(i for i in range(120, 200) if st300[i] is not None)
+    c1 = monthly_shrunk_components([synth[i] for i in range(300)], st300, ages300, tv, 3)
+    c2 = monthly_shrunk_components(fl300, stf300, agesf300, tv, 3)
+    mirr = max(abs(c2["p_trans"][i] - c1["p_trans"][2 - i]) for i in range(3))
+    checks.append(("月度收缩-符号对称", mirr < 1e-12, f"max|Δ|={mirr:.3e}"))
+
+    samples3 = [{"mean": 0.5, "q05": 0.2, "q95": 0.9},
+                {"mean": 0.8, "q05": 0.5, "q95": 1.1}]
+    svg_fc = _svg_fc_curve(["MAM", "JJA"], samples3)
+    svg_rel = _svg_reliability([("3 个月", cal, "hsl(8,62%,42%)")])
+    heat_htm = _heatmap_table(heat, (3,))
+    vis_ok = ('<svg' in svg_fc and 'polygon' in svg_fc and 'polyline' in svg_fc
+              and '<svg' in svg_rel and '<circle' in svg_rel
+              and 'table class="heat"' in heat_htm)
+    checks.append(("可视化组件-生成", vis_ok, "SVG/表格片段完整"))
 
     passed = sum(1 for _, ok, _ in checks if ok)
     if verbose:
@@ -852,7 +1110,6 @@ def selftest(verbose: bool = True) -> bool:
         print("-" * 66)
         print(f"  结果：{passed}/{len(checks)} 通过")
     return passed == len(checks)
-
 
 # --------------------------------------------------------------------------
 # CLI
@@ -877,7 +1134,6 @@ def cmd_forecast(args) -> int:
                  write_json=args.json)
     return 0
 
-
 def cmd_update(args) -> int:
     try:
         text = fetch_oni_text()
@@ -891,7 +1147,6 @@ def cmd_update(args) -> int:
     save_cache(text)
     print(f"已更新 {CACHE_FILE}：{obs[0].label} .. {obs[-1].label}，共 {len(obs)} 个月。")
     return 0
-
 
 def cmd_backtest(args) -> int:
     obs, _source = load_obs(refresh=args.refresh, data_file=args.data_file)
@@ -922,7 +1177,6 @@ def cmd_backtest(args) -> int:
     print("-" * len(line))
     print(" 说明：技能分为正表示优于历史气候态基线；接近 0 表示与气候态相当。")
     return 0
-
 
 # --------------------------------------------------------------------------
 # HTML 可视化报告
@@ -998,8 +1252,18 @@ table.skills tr:last-child td { border-bottom: none; }
 .neg { color: #c62828; font-weight: 600; }
 footer { margin-top: 30px; font-size: 12px; color: #7a8799; border-top: 1px solid #e3e8ee; padding-top: 14px; }
 footer p { margin: 4px 0; }
+.hint { font-size: 12.5px; color: #7a8799; margin: -2px 0 12px; line-height: 1.6; }
+.ana-grid { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin-bottom: 6px; }
+.ana-card { background: #fff; border: 1px solid #e6ebf1; border-radius: 12px; padding: 14px 16px; }
+.ana-year { font-size: 15px; font-weight: 700; color: #26364a; margin-bottom: 8px; font-family: Consolas, Menlo, monospace; }
+.ana-row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; color: #5b6b7b; margin: 5px 0; gap: 8px; }
+.ana-row b { color: #26364a; }
+.mono { font-family: Consolas, Menlo, monospace; }
+table.heat { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; font-size: 13px; margin-bottom: 6px; }
+table.heat th, table.heat td { padding: 9px 12px; text-align: center; border: 1px solid #eef2f6; }
+table.heat th { background: #f2f5f9; color: #46576a; font-weight: 600; }
+.rel-grid { grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); }
 """
-
 
 def _event_bands(states: Sequence[Optional[int]]) -> List[Tuple[int, int, int]]:
     """连续 >= 5 个月的同号事件区间，返回 (起, 止, 状态)。"""
@@ -1017,7 +1281,6 @@ def _event_bands(states: Sequence[Optional[int]]) -> List[Tuple[int, int, int]]:
         else:
             i += 1
     return bands
-
 
 def _svg_series(obs_s: Sequence[Obs], an_s: Sequence[Optional[float]],
                 st_s: Sequence[Optional[int]], width: int = 1160,
@@ -1091,11 +1354,9 @@ def _svg_series(obs_s: Sequence[Obs], an_s: Sequence[Optional[float]],
     out.append("</svg>")
     return "".join(out)
 
-
 def _fc(entries: dict, h: int, key: str, fmt: str = ".3f") -> str:
     v = entries[h][2].get(key)
     return ("n/a" if v is None else format(v, fmt))
-
 
 def _forecast_card(h: int, entries: dict) -> str:
     target, fc, skills, w, note = entries[h]
@@ -1127,11 +1388,111 @@ def _forecast_card(h: int, entries: dict) -> str:
         f'<div class="fc-foot">{foot}</div></div>'
     )
 
+def _svg_fc_curve(labels_s: Sequence[str], pts: Sequence[Optional[dict]],
+                  width: int = 1160, height: int = 320) -> str:
+    """未来 ONI 点预测曲线（均值 + 90% 阴影带，含 ±0.5 阈值虚线）。"""
+    pad_l, pad_r, pad_t, pad_b = 58, 16, 18, 32
+    pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
+    y_lo, y_hi = -3.0, 3.5
+    w, h = width, height
+
+    def yp(v: float) -> float:
+        v = max(y_lo, min(y_hi, v))
+        return pad_t + (y_hi - v) / (y_hi - y_lo) * ph
+
+    n = len(labels_s)
+
+    def xp(i: int) -> float:
+        return pad_l + (pw * i / (n - 1) if n > 1 else pw / 2)
+
+    out = [f'<svg viewBox="0 0 {w} {h}" preserveAspectRatio="xMidYMid meet" role="img">']
+    y = -3.0
+    while y <= 3.5 + 1e-9:
+        yy = yp(y)
+        cls = "grid"
+        if abs(y - 0.5) < 1e-9 or abs(y + 0.5) < 1e-9:
+            cls = "grid thresh-pos" if y > 0 else "grid thresh-neg"
+        elif abs(y) < 1e-9:
+            cls = "grid zero"
+        out.append(f'<line class="{cls}" x1="{pad_l}" y1="{yy:.1f}" x2="{w - pad_r}" y2="{yy:.1f}"/>')
+        ty = 0.0 if abs(y) < 1e-9 else y
+        out.append(f'<text class="ytick" x="{pad_l - 8}" y="{yy + 4:.1f}">{ty:+.1f}</text>')
+        y += 0.5
+
+    idx = [i for i in range(n) if pts[i] is not None]
+    if len(idx) >= 2:
+        up = " ".join(f"{xp(i):.1f},{yp(pts[i]['q95']):.1f}" for i in idx)
+        lo = " ".join(f"{xp(i):.1f},{yp(pts[i]['q05']):.1f}" for i in reversed(idx))
+        out.append(f'<polygon points="{up} {lo}" fill="#34465c" opacity="0.12"/>')
+        means = " ".join(f"{xp(i):.1f},{yp(pts[i]['mean']):.1f}" for i in idx)
+        out.append(f'<polyline class="series" points="{means}"/>')
+        for i in idx:
+            out.append(f'<circle class="dot" cx="{xp(i):.1f}" cy="{yp(pts[i]["mean"]):.1f}" r="2.6"/>')
+            if i % 2 == 1 or i == idx[-1]:
+                out.append(f'<text class="xtick" x="{xp(i):.1f}" y="{h - pad_b + 16}">{labels_s[i]}</text>')
+        last_i = idx[-1]
+        out.append(f'<text class="lastlabel" x="{xp(last_i):.1f}" '
+                   f'y="{yp(pts[last_i]["mean"]) - 10:.1f}">{pts[last_i]["mean"]:+.2f}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+def _svg_reliability(series_s: Sequence[Tuple[str, List[dict], str]],
+                     width: int = 560, height: int = 430) -> str:
+    """可靠性曲线：x=预测概率, y=实际频率；对角虚线为完美校准。"""
+    pad_l, pad_r, pad_t, pad_b = 52, 14, 14, 38
+    pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
+
+    def px(x: float) -> float:
+        return pad_l + min(max(x, 0.0), 1.0) * pw
+
+    def py(x: float) -> float:
+        return pad_t + (1.0 - min(max(x, 0.0), 1.0)) * ph
+
+    out = [f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet" role="img">']
+    for g in range(0, 6):
+        f = g / 5
+        out.append(f'<line class="grid" x1="{px(0):.1f}" y1="{py(f):.1f}" x2="{px(1):.1f}" y2="{py(f):.1f}"/>')
+        out.append(f'<line class="grid" x1="{px(f):.1f}" y1="{py(0):.1f}" x2="{px(f):.1f}" y2="{py(1):.1f}"/>')
+        out.append(f'<text class="ytick" x="{pad_l - 8}" y="{py(f) + 4:.1f}">{f:.1f}</text>')
+        out.append(f'<text class="xtick" x="{px(f):.1f}" y="{height - pad_b + 16}">{f:.1f}</text>')
+    out.append(f'<line x1="{px(0):.1f}" y1="{py(0):.1f}" x2="{px(1):.1f}" y2="{py(1):.1f}" '
+               f'class="grid thresh-pos"/>')
+    for label, buckets, color in series_s:
+        for b in buckets:
+            if b["n"] < 15 or b["mean_pred"] is None:
+                continue
+            r = min(2.0 + math.sqrt(b["n"]) / 2, 7.0)
+            out.append(f'<circle cx="{px(b["mean_pred"]):.1f}" cy="{py(b["freq_obs"]):.1f}" '
+                       f'r="{r:.1f}" fill="{color}" opacity="0.85"><title>'
+                       f'{label} 预测 {b["mean_pred"]:.2f} 实际 {b["freq_obs"]:.2f} n={b["n"]}</title></circle>')
+    out.append("</svg>")
+    return "".join(out)
+
+def _heatmap_table(heat: dict, horizons: Sequence[int]) -> str:
+    """技能热力图：起报月 × 提前期，绿色=有技能，红色=负技能。"""
+    rows = []
+    for m in range(12):
+        cells = [f'<td style="text-align:left;font-weight:600">{SEASONS[m]}</td>']
+        for h in horizons:
+            v = heat[m].get(h)
+            if v is None:
+                cells.append('<td style="background:#f2f5f9;color:#9aa7b5">·</td>')
+            else:
+                alpha = min(abs(v) / 0.6, 1.0)
+                col = f"rgba(46,125,50,{alpha:.2f})" if v > 0 else f"rgba(198,40,40,{alpha:.2f})"
+                cells.append(f'<td style="background:{col};color:#fff;font-weight:600">{v:+.2f}</td>')
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    head = "<tr><th>起报月</th>" + "".join(f"<th>{h}个月</th>" for h in horizons) + "</tr>"
+    return (f'<table class="heat"><thead>{head}</thead><tbody>{"".join(rows)}</tbody></table>')
 
 def build_report_html(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
                       states: Sequence[Optional[int]], ages: Sequence[int],
                       t_now: int, horizons: Sequence[int], entries: dict,
-                      source: str) -> str:
+                      source: str,
+                      heat: Optional[dict] = None,
+                      calibs: Optional[dict] = None,
+                      analogs: Optional[List[dict]] = None,
+                      oni_fc: Optional[dict] = None) -> str:
     latest = obs[t_now]
     state = states[t_now]
     badge_bg = _COLOR[state]
@@ -1152,7 +1513,6 @@ def build_report_html(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
 
     cards = "\n".join(_forecast_card(h, entries) for h in horizons)
 
-    # 技能表
     rows = []
     for h in horizons:
         sk = entries[h][2]
@@ -1170,6 +1530,44 @@ def build_report_html(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
     svg_full = _svg_series(obs, anoms, states)
     n10 = 120
     svg_recent = _svg_series(obs[-n10:], anoms[-n10:], states[-n10:], dots=True)
+
+    analog_h = 6 if 6 in horizons else horizons[0]
+    if analogs is None:
+        analogs = top_analogs(obs, anoms, states, t_now, analog_h)
+    analog_cards = []
+    for a in analogs:
+        st = a["state"]
+        tc = _COLOR.get(st, "#8895a3")
+        st_lab = STATE_LABELS.get(st, "n/a")
+        dist = f"{a['distance']:.2f}"
+        tv = f"{a['target_oni']:+.2f}" if a["target_oni"] is not None else "n/a"
+        analog_cards.append(
+            f'<div class="ana-card"><div class="ana-year">{a["label"]}</div>'
+            f'<div class="ana-row"><span>{analog_h} 个月后</span>'
+            f'<b>{a["target"]}</b></div>'
+            f'<div class="ana-row"><span>当时 ONI</span><b class="mono">{tv}</b></div>'
+            f'<div class="ana-row"><span>实际状态</span>'
+            f'<span class="badge" style="background:{tc}">{st_lab}</span></div>'
+            f'<div class="ana-row"><span>轨迹距离</span><b class="mono">{dist}</b></div></div>')
+    analog_panel = "\n".join(analog_cards) or "<p>相似年份样本不足。</p>"
+
+    fc_labels = [horizon_label(obs, t_now, h) for h in range(1, 13)]
+    if oni_fc is None:
+        oni_fc = [oni_point_forecast(anoms, t_now, h) for h in range(1, 13)]
+    svg_fc = _svg_fc_curve(fc_labels, oni_fc)
+
+    if heat is None:
+        heat = skill_heatmap(anoms, states, ages, horizons=horizons)
+    heat_html = _heatmap_table(heat, horizons)
+
+    if calibs is None:
+        calibs = {h: compute_calibration(anoms, states, ages, h) for h in horizons}
+    rel_cells = []
+    for i, h in enumerate(horizons):
+        color = f"hsl({(i * 67 + 8) % 360},62%,42%)"
+        svg_rel = _svg_reliability([(f"{h} 个月", calibs[h], color)])
+        rel_cells.append(f'<div class="svg-box"><h3>{h} 个月（组合模型）</h3>{svg_rel}</div>')
+    rel_panel = "\n".join(rel_cells)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1218,6 +1616,18 @@ def build_report_html(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
     {cards}
   </section>
 
+  <h2>最相似历史年份</h2>
+  <p class="hint">当前近 6 个月 ONI 轨迹与下列历史时段最相似，展示它们 {analog_h} 个月后的实际走向（距离越小越相似）。</p>
+  <section class="grid ana-grid">
+    {analog_panel}
+  </section>
+
+  <h2>未来 ONI 点预测（相似型加权 · 距平值）</h2>
+  <div class="svg-box">
+    <h3>未来 12 个月（实线=加权均值，阴影=90% 区间，虚线=±0.5 阈值）</h3>
+    {svg_fc}
+  </div>
+
   <h2>ONI 历史序列</h2>
   <div class="legend">
     <span><i class="sw" style="background:#34465c"></i>ONI 值</span>
@@ -1236,9 +1646,20 @@ def build_report_html(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
     <tbody>{skill_table}</tbody>
   </table>
 
+  <h2>技能热力图（起报月 × 提前期）</h2>
+  <p class="hint">按月收缩后的组合模型在 1990 年以来各起报月上的 Brier 技能分。绿色=优于气候态；春季起报的技能通常显著低于秋冬起报（春季预报障碍）。</p>
+  {heat_html}
+
+  <h2>概率校准（可靠性曲线）</h2>
+  <p class="hint">把组合模型的历史预测概率分桶，横轴=预测概率，纵轴=桶内实际发生频率。点越贴近对角线（虚线），概率越可信；点在对角线下方=模型高估该状态概率。</p>
+  <div class="grid rel-grid">
+    {rel_panel}
+  </div>
+
   <footer>
-    <p><b>方法</b>：状态转移模型（相位年龄分层 + Dirichlet 后验）与历史相似型模型（离散轨迹近邻核加权）
-    按 1970 年以来的样本外回测 Brier 技能分加权组合；90% 区间来自 Dirichlet 蒙特卡洛抽样。</p>
+    <p><b>方法</b>：状态转移模型（相位年龄分层 + Dirichlet 后验）与历史相似型模型（轨迹近邻核加权）按样本外回测
+    Brier 技能分组合；两个模型均做"起报月分层 + 经验贝叶斯收缩"以缓解春季预报障碍；90% 区间来自 Dirichlet
+    蒙特卡洛抽样；未来 ONI 点预测为相似型加权均值（90% 区间为加权分位）；可靠性曲线用于检验概率校准。</p>
     <p><b>说明</b>：概率为历史统计外推，不等于官方季节预报，也不构成决策依据。模型仅使用 ONI 单变量，
     未纳入次表层海温、风场与印度洋-太平洋耦合信息；技能分接近 0 的提前期仅可作弱信号参考。</p>
     <p>数据源：NOAA CPC · https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt ·
@@ -1249,7 +1670,6 @@ def build_report_html(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
 </html>
 """
     return html
-
 
 def cmd_report(args) -> int:
     obs, source = load_obs(refresh=args.refresh, data_file=args.data_file,
@@ -1266,29 +1686,31 @@ def cmd_report(args) -> int:
     horizons = [int(x) for x in args.horizons.split(",") if x.strip()]
     entries = {}
     for h in horizons:
-        p_trans, alpha, _ = transition_distribution(states, ages, t_now, h)
-        analog = analog_distribution(anoms, states, t_now, h)
+        comp = monthly_shrunk_components(anoms, states, ages, t_now, h)
         skills = compute_skills(anoms, states, ages, h)
         w, note = skill_weights(skills)
-        if analog is None:
-            w = (1.0, 0.0)
-        fc = blend_forecast(p_trans, analog, w,
-                            simulate=not args.no_bootstrap, alpha=alpha)
+        analog_arg = None
+        if comp["p_analog"] is not None:
+            analog_arg = (comp["p_analog"], comp["analog_weights"],
+                          comp["n_analog_eff"])
+            if comp["n_analog_eff"] < 5:
+                w = (1.0, 0.0)
+        fc = blend_forecast(comp["p_trans"], analog_arg, w,
+                            simulate=not args.no_bootstrap, alpha=comp["alpha"])
         entries[h] = (horizon_label(obs, t_now, h), fc, skills, w, note)
 
     html = build_report_html(obs, anoms, states, ages, t_now, horizons, entries, source)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
     print(f"已生成可视化报告：{out}")
     print(f"  概率卡片 {len(horizons)} 个 · ONI 曲线 2 张 · 回测技能表 1 张")
     print("  用浏览器打开即可查看（含 90% 置信区间与事件色带）。")
     return 0
 
-
 def cmd_selftest(args) -> int:
     return 0 if selftest() else 1
-
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -1338,14 +1760,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(func=cmd_report)
     return p
 
-
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "cmd", None):
         args = parser.parse_args(["forecast"])
     return args.func(args)
-
 
 if __name__ == "__main__":
     sys.exit(main())
