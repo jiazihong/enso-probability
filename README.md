@@ -18,6 +18,9 @@ python enso_prob.py forecast --chart --json
 # 查看各模型的历史回测技能
 python enso_prob.py backtest --horizons 3,6,12
 
+# 生成可视化 HTML 报告（概率条形图 + ONI 历史曲线 + 回测技能表）
+python enso_prob.py report
+
 # 运行内置自测
 python enso_prob.py selftest
 ```
@@ -125,7 +128,7 @@ BS = (1/3) Σ_i (p_i - y_i)²
 enso-probability/
 ├── enso_prob.py        # 主程序（含自测模块）
 ├── data/oni_cache.csv  # ONI 数据快照（离线可用）
-├── output/             # 运行时生成（forecast.json，已 gitignore）
+├── output/             # 运行时生成（forecast.json / enso_report.html，已 gitignore）
 └── README.md
 ```
 

@@ -25,6 +25,7 @@ ENSO 概率分析工具 (ENSO Probability Tool)
     python enso_prob.py forecast --json        # 同时输出 output/forecast.json
     python enso_prob.py forecast --chart       # 附带最近 72 个月 ONI 柱状图
     python enso_prob.py backtest               # 查看各模型历史技能
+    python enso_prob.py report                 # 生成可视化 HTML 报告
     python enso_prob.py selftest               # 运行内置自测
 """
 
@@ -923,6 +924,368 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# HTML 可视化报告
+# --------------------------------------------------------------------------
+
+_COLOR = {EL_NINO: "#e0472e", NEUTRAL: "#8a9299", LA_NINA: "#1f6fb2"}
+_COLOR_BAND = {EL_NINO: "#e0472e", LA_NINA: "#1f6fb2"}
+
+_REPORT_CSS = """
+:root { color-scheme: light; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f5f7fa; color: #1c2733; line-height: 1.55;
+}
+.wrap { max-width: 1200px; margin: 0 auto; padding: 28px 20px 48px; }
+header h1 { font-size: 26px; letter-spacing: .5px; }
+header .sub { color: #5b6b7b; margin-top: 6px; font-size: 13px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip {
+  background: #fff; border: 1px solid #e3e8ee; color: #46576a;
+  border-radius: 999px; padding: 3px 12px; font-size: 12px;
+}
+.card { background: #fff; border: 1px solid #e6ebf1; border-radius: 14px; padding: 18px 20px; }
+.grid { display: grid; gap: 14px; }
+.now { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin: 20px 0 14px; }
+.now .label { font-size: 12px; color: #7a8799; margin-bottom: 4px; }
+.oni-val { font-size: 34px; font-weight: 700; font-family: Consolas, Menlo, monospace; }
+.badge {
+  display: inline-block; color: #fff; border-radius: 8px; padding: 5px 14px;
+  font-size: 15px; font-weight: 600; margin-top: 4px;
+}
+.alert {
+  background: #fff7e6; border: 1px solid #ffd591; border-radius: 12px;
+  color: #8a5a00; padding: 10px 16px; font-size: 13px; margin-bottom: 14px;
+}
+h2 { font-size: 17px; margin: 26px 0 12px; color: #26364a; }
+.fc-grid { grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); }
+.fc-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+.fc-head .h { font-size: 15px; font-weight: 700; }
+.fc-head .t { font-size: 12px; color: #7a8799; }
+.bar-row { display: grid; grid-template-columns: 58px 1fr 64px; align-items: center; gap: 8px; margin: 9px 0; }
+.bar-name { font-size: 13px; color: #46576a; }
+.bar-track { background: #eef2f6; border-radius: 6px; height: 14px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 6px; transition: width .4s; }
+.bar-pct { font-size: 13px; font-weight: 700; font-family: Consolas, Menlo, monospace; text-align: right; }
+.bar-ci { font-size: 11px; color: #9aa7b5; text-align: right; grid-column: 2/4; margin-top: -6px; }
+.fc-foot { border-top: 1px dashed #e6ebf1; margin-top: 10px; padding-top: 8px; font-size: 11.5px; color: #7a8799; }
+.svg-box { background: #fff; border: 1px solid #e6ebf1; border-radius: 14px; padding: 14px 16px 6px; margin-bottom: 14px; }
+.svg-box h3 { font-size: 14px; color: #26364a; margin-bottom: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: #5b6b7b; margin: 4px 0 24px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 10px; border-radius: 3px; display: inline-block; }
+svg { width: 100%; height: auto; display: block; }
+.grid { stroke: #e6ebf1; stroke-width: 1; }
+.grid.zero { stroke: #c8d2dd; }
+.grid.thresh-pos { stroke: #e0472e; stroke-dasharray: 5 4; opacity: .55; }
+.grid.thresh-neg { stroke: #1f6fb2; stroke-dasharray: 5 4; opacity: .55; }
+.ytick, .xtick { font-size: 10.5px; fill: #7a8799; }
+.ytick { text-anchor: end; }
+.xtick { text-anchor: middle; }
+.xtick-line { stroke: #d5dde6; stroke-width: 1; }
+.series { fill: none; stroke: #34465c; stroke-width: 1.6; }
+.dot { fill: #34465c; }
+.last { fill: #d4380d; }
+.lastlabel { font-size: 11px; fill: #d4380d; font-weight: 700; text-anchor: end; }
+table.skills { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; font-size: 13px; }
+table.skills th, table.skills td { padding: 9px 12px; text-align: right; border-bottom: 1px solid #eef2f6; }
+table.skills th { background: #f2f5f9; color: #46576a; font-weight: 600; }
+table.skills th:first-child, table.skills td:first-child { text-align: left; }
+table.skills tr:last-child td { border-bottom: none; }
+.pos { color: #2e7d32; font-weight: 600; }
+.neg { color: #c62828; font-weight: 600; }
+footer { margin-top: 30px; font-size: 12px; color: #7a8799; border-top: 1px solid #e3e8ee; padding-top: 14px; }
+footer p { margin: 4px 0; }
+"""
+
+
+def _event_bands(states: Sequence[Optional[int]]) -> List[Tuple[int, int, int]]:
+    """连续 >= 5 个月的同号事件区间，返回 (起, 止, 状态)。"""
+    bands: List[Tuple[int, int, int]] = []
+    i, n = 0, len(states)
+    while i < n:
+        s = states[i]
+        if s in (EL_NINO, LA_NINA):
+            j = i
+            while j + 1 < n and states[j + 1] == s:
+                j += 1
+            if j - i + 1 >= 5:
+                bands.append((i, j, s))
+            i = j + 1
+        else:
+            i += 1
+    return bands
+
+
+def _svg_series(obs_s: Sequence[Obs], an_s: Sequence[Optional[float]],
+                st_s: Sequence[Optional[int]], width: int = 1160,
+                height: int = 330, dots: bool = False) -> str:
+    """ONI 折线图 SVG（静态生成，含事件色带与 +/-0.5 阈值线）。"""
+    n = len(obs_s)
+    pad_l, pad_r, pad_t, pad_b = 58, 16, 18, 32
+    pw, ph = width - pad_l - pad_r, height - pad_t - pad_b
+    y_lo, y_hi = -3.0, 3.5
+
+    def xp(i: int) -> float:
+        return pad_l + (pw * i / (n - 1) if n > 1 else pw / 2)
+
+    def yp(v: float) -> float:
+        v = max(y_lo, min(y_hi, v))
+        return pad_t + (y_hi - v) / (y_hi - y_lo) * ph
+
+    out = [f'<svg viewBox="0 0 {width} {height}" preserveAspectRatio="xMidYMid meet" role="img">']
+
+    y = -3.0
+    while y <= 3.5 + 1e-9:
+        yy = yp(y)
+        cls = "grid"
+        if abs(y - 0.5) < 1e-9 or abs(y + 0.5) < 1e-9:
+            cls = "grid thresh-pos" if y > 0 else "grid thresh-neg"
+        elif abs(y) < 1e-9:
+            cls = "grid zero"
+        out.append(f'<line class="{cls}" x1="{pad_l}" y1="{yy:.1f}" x2="{width - pad_r}" y2="{yy:.1f}"/>')
+        ty = 0.0 if abs(y) < 1e-9 else y
+        out.append(f'<text class="ytick" x="{pad_l - 8}" y="{yy + 4:.1f}">{ty:+.1f}</text>')
+        y += 0.5
+
+    for i0, i1, s in _event_bands(st_s):
+        bw = max(1.0, xp(i1) - xp(i0))
+        out.append(f'<rect x="{xp(i0):.1f}" y="{pad_t}" width="{bw:.1f}" height="{ph:.1f}" '
+                   f'fill="{_COLOR_BAND[s]}" opacity="0.12"/>')
+
+    seg: List[int] = []
+    for i, v in enumerate(an_s):
+        if v is None:
+            if seg:
+                pts = " ".join(f"{xp(j):.1f},{yp(an_s[j]):.1f}" for j in seg)
+                out.append(f'<polyline class="series" points="{pts}"/>')
+                seg = []
+        else:
+            seg.append(i)
+    if seg:
+        pts = " ".join(f"{xp(j):.1f},{yp(an_s[j]):.1f}" for j in seg)
+        out.append(f'<polyline class="series" points="{pts}"/>')
+
+    if dots:
+        for i, v in enumerate(an_s):
+            if v is not None:
+                out.append(f'<circle class="dot" cx="{xp(i):.1f}" cy="{yp(v):.1f}" r="2.4"/>')
+
+    last = next((i for i in range(n - 1, -1, -1) if an_s[i] is not None), None)
+    if last is not None:
+        out.append(f'<circle class="last" cx="{xp(last):.1f}" cy="{yp(an_s[last]):.1f}" r="4"/>')
+        out.append(f'<text class="lastlabel" x="{xp(last):.1f}" y="{yp(an_s[last]) - 10:.1f}">{an_s[last]:+.2f}</text>')
+
+    span = obs_s[-1].month_index - obs_s[0].month_index
+    step = 120 if span > 480 else 12
+    prev_year = None
+    for i, o in enumerate(obs_s):
+        if o.year % (step // 12) == 0 and o.season == "DJF" and o.year != prev_year:
+            prev_year = o.year
+            out.append(f'<line class="xtick-line" x1="{xp(i):.1f}" y1="{pad_t + ph}" '
+                       f'x2="{xp(i):.1f}" y2="{pad_t + ph + 5}"/>')
+            out.append(f'<text class="xtick" x="{xp(i):.1f}" y="{pad_t + ph + 19}">{o.year}</text>')
+
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _fc(entries: dict, h: int, key: str, fmt: str = ".3f") -> str:
+    v = entries[h][2].get(key)
+    return ("n/a" if v is None else format(v, fmt))
+
+
+def _forecast_card(h: int, entries: dict) -> str:
+    target, fc, skills, w, note = entries[h]
+    rows = []
+    for s in STATE_ORDER:
+        i = s + 1
+        p = fc["p"][i]
+        lo, hi = fc["interval"][i] if fc["interval"] else (None, None)
+        ci = f"{lo * 100:.1f}–{hi * 100:.1f}%" if lo is not None else "—"
+        rows.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-name">{STATE_LABELS[s]}</span>'
+            f'<div class="bar-track"><div class="bar-fill" '
+            f'style="width:{max(p * 100, 0.8):.1f}%;background:{_COLOR[s]}"></div></div>'
+            f'<span class="bar-pct">{p * 100:.1f}%</span>'
+            f'<span class="bar-ci">90%CI {ci}</span></div>'
+        )
+    sk_t = _fc(entries, h, "skill_trans", "+.3f")
+    sk_a = _fc(entries, h, "skill_analog", "+.3f")
+    foot = (f"模型权重：转移 {w[0]:.2f} · 相似 {w[1]:.2f}"
+            f"　|　回测技能：转移 {sk_t} · 相似 {sk_a}")
+    if note:
+        foot += f"　|　{note}"
+    return (
+        f'<div class="card">'
+        f'<div class="fc-head"><span class="h">未来 {h} 个月</span>'
+        f'<span class="t">{target}</span></div>'
+        f'{"".join(rows)}'
+        f'<div class="fc-foot">{foot}</div></div>'
+    )
+
+
+def build_report_html(obs: Sequence[Obs], anoms: Sequence[Optional[float]],
+                      states: Sequence[Optional[int]], ages: Sequence[int],
+                      t_now: int, horizons: Sequence[int], entries: dict,
+                      source: str) -> str:
+    latest = obs[t_now]
+    state = states[t_now]
+    badge_bg = _COLOR[state]
+    gen_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    alert = ""
+    if state == NEUTRAL:
+        pos = _trailing_run(anoms, t_now, above=True)
+        neg = _trailing_run(anoms, t_now, above=False)
+        if max(pos, neg) >= EVENT_WINDOW - 1:
+            if pos >= neg:
+                msg = (f"临近判定：近 {pos} 个月 ONI ≥ +0.5，"
+                       f"再持续 1 个月即触发厄尔尼诺判定（官方规则有约 5 个月滞后）")
+            else:
+                msg = (f"临近判定：近 {neg} 个月 ONI ≤ -0.5，"
+                       f"再持续 1 个月即触发拉尼娜判定（官方规则有约 5 个月滞后）")
+            alert = f'<div class="alert">⚠ {msg}</div>'
+
+    cards = "\n".join(_forecast_card(h, entries) for h in horizons)
+
+    # 技能表
+    rows = []
+    for h in horizons:
+        sk = entries[h][2]
+        fmt = lambda x: ("n/a" if x is None else f"{x:.4f}")
+        cls = lambda x: "" if x is None else ("pos" if x > 0 else "neg")
+        rows.append(
+            f"<tr><td>{h} 个月</td><td>{sk['n_eval']}</td>"
+            f"<td>{fmt(sk['brier_trans'])}</td><td>{fmt(sk['brier_analog'])}</td>"
+            f"<td>{fmt(sk['brier_clim'])}</td>"
+            f"<td class='{cls(sk['skill_trans'])}'>{fmt(sk['skill_trans'])}</td>"
+            f"<td class='{cls(sk['skill_analog'])}'>{fmt(sk['skill_analog'])}</td></tr>"
+        )
+    skill_table = "".join(rows)
+
+    svg_full = _svg_series(obs, anoms, states)
+    n10 = 120
+    svg_recent = _svg_series(obs[-n10:], anoms[-n10:], states[-n10:], dots=True)
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ENSO 概率报告 · {latest.label}</title>
+<style>{_REPORT_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>ENSO 厄尔尼诺 / 拉尼娜概率报告</h1>
+    <div class="sub">基于 NOAA CPC ONI v5（Niño3.4 海温距平，ERSSTv5）+ 转移模型 &amp; 历史相似型模型</div>
+    <div class="meta">
+      <span class="chip">数据 {obs[0].label} – {obs[-1].label}</span>
+      <span class="chip">{len(obs)} 个月</span>
+      <span class="chip">生成于 {gen_time}（本地时间）</span>
+      <span class="chip">数据获取：{source}</span>
+    </div>
+  </header>
+
+  <section class="grid now">
+    <div class="card">
+      <div class="label">最新 ONI（{latest.label}）</div>
+      <div class="oni-val">{latest.anom:+.2f}</div>
+    </div>
+    <div class="card">
+      <div class="label">当前状态</div>
+      <span class="badge" style="background:{badge_bg}">{STATE_LABELS[state]}（{STATE_LABELS_EN[state]}）</span>
+    </div>
+    <div class="card">
+      <div class="label">状态已持续</div>
+      <div class="oni-val">{ages[t_now]}<span style="font-size:15px"> 个月</span></div>
+    </div>
+    <div class="card">
+      <div class="label">判定规则</div>
+      <div style="font-size:12.5px;color:#46576a;margin-top:2px">ONI 连续 5 个重叠三月 ≥ +0.5 为厄尔尼诺，≤ −0.5 为拉尼娜，否则中性</div>
+    </div>
+  </section>
+
+  {alert}
+
+  <h2>未来概率</h2>
+  <section class="grid fc-grid">
+    {cards}
+  </section>
+
+  <h2>ONI 历史序列</h2>
+  <div class="legend">
+    <span><i class="sw" style="background:#34465c"></i>ONI 值</span>
+    <span><i class="sw" style="background:#e0472e;opacity:.55"></i>厄尔尼诺事件</span>
+    <span><i class="sw" style="background:#1f6fb2;opacity:.55"></i>拉尼娜事件</span>
+    <span><i class="sw" style="background:transparent;border-top:2px dashed #e0472e"></i>+0.5 阈值</span>
+    <span><i class="sw" style="background:transparent;border-top:2px dashed #1f6fb2"></i>−0.5 阈值</span>
+  </div>
+  <div class="svg-box"><h3>全历史（{obs[0].year}–{obs[-1].year}）</h3>{svg_full}</div>
+  <div class="svg-box"><h3>近 10 年</h3>{svg_recent}</div>
+
+  <h2>模型回测技能</h2>
+  <table class="skills">
+    <thead><tr><th>提前期</th><th>评估数</th><th>转移 BS</th><th>相似 BS</th>
+    <th>气候 BS</th><th>转移技能</th><th>相似技能</th></tr></thead>
+    <tbody>{skill_table}</tbody>
+  </table>
+
+  <footer>
+    <p><b>方法</b>：状态转移模型（相位年龄分层 + Dirichlet 后验）与历史相似型模型（离散轨迹近邻核加权）
+    按 1970 年以来的样本外回测 Brier 技能分加权组合；90% 区间来自 Dirichlet 蒙特卡洛抽样。</p>
+    <p><b>说明</b>：概率为历史统计外推，不等于官方季节预报，也不构成决策依据。模型仅使用 ONI 单变量，
+    未纳入次表层海温、风场与印度洋-太平洋耦合信息；技能分接近 0 的提前期仅可作弱信号参考。</p>
+    <p>数据源：NOAA CPC · https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt ·
+    本报告由 enso_prob.py report 生成，可随时用最新数据重新生成。</p>
+  </footer>
+</div>
+</body>
+</html>
+"""
+    return html
+
+
+def cmd_report(args) -> int:
+    obs, source = load_obs(refresh=args.refresh, data_file=args.data_file,
+                           allow_network=not args.offline)
+    anoms = [o.anom for o in obs]
+    states = classify_states(anoms)
+    ages = phase_ages(states)
+
+    valid = [i for i, s in enumerate(states) if s is not None]
+    if not valid:
+        raise SystemExit("数据不足：至少需要 5 个月的有效 ONI 才能判定状态。")
+    t_now = valid[-1]
+
+    horizons = [int(x) for x in args.horizons.split(",") if x.strip()]
+    entries = {}
+    for h in horizons:
+        p_trans, alpha, _ = transition_distribution(states, ages, t_now, h)
+        analog = analog_distribution(anoms, states, t_now, h)
+        skills = compute_skills(anoms, states, ages, h)
+        w, note = skill_weights(skills)
+        if analog is None:
+            w = (1.0, 0.0)
+        fc = blend_forecast(p_trans, analog, w,
+                            simulate=not args.no_bootstrap, alpha=alpha)
+        entries[h] = (horizon_label(obs, t_now, h), fc, skills, w, note)
+
+    html = build_report_html(obs, anoms, states, ages, t_now, horizons, entries, source)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = Path(args.out)
+    out.write_text(html, encoding="utf-8")
+    print(f"已生成可视化报告：{out}")
+    print(f"  概率卡片 {len(horizons)} 个 · ONI 曲线 2 张 · 回测技能表 1 张")
+    print("  用浏览器打开即可查看（含 90% 置信区间与事件色带）。")
+    return 0
+
+
 def cmd_selftest(args) -> int:
     return 0 if selftest() else 1
 
@@ -936,6 +1299,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  python enso_prob.py update\n"
                "  python enso_prob.py forecast --chart --json\n"
                "  python enso_prob.py backtest --horizons 3,6,12\n"
+               "  python enso_prob.py report\n"
                "  python enso_prob.py selftest\n",
     )
     sub = p.add_subparsers(dest="cmd")
@@ -959,11 +1323,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(b)
     b.add_argument("--horizons", default="3,6,9,12")
 
+    r = sub.add_parser("report", help="生成可视化 HTML 报告")
+    add_common(r)
+    r.add_argument("--horizons", default="3,6,9,12", help="概率卡片提前期，月，逗号分隔")
+    r.add_argument("--out", default=str(OUT_DIR / "enso_report.html"), help="输出 HTML 路径")
+    r.add_argument("--no-bootstrap", action="store_true", help="跳过区间抽样（更快）")
+    r.add_argument("--offline", action="store_true", help="禁止联网")
+
     s = sub.add_parser("selftest", help="运行内置自测")
     s.set_defaults(func=cmd_selftest)
 
     f.set_defaults(func=cmd_forecast)
     b.set_defaults(func=cmd_backtest)
+    r.set_defaults(func=cmd_report)
     return p
 
 
