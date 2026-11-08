@@ -1,4 +1,4 @@
-# fetched=2026-10-23T08:49:10Z source=https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt
+# fetched=2026-11-08T08:31:38Z source=https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt
  SEAS  YR   TOTAL   ANOM
   DJF 1950  25.01  -1.32
   JFM 1950  25.36  -1.20
@@ -920,3 +920,4 @@
   MJJ 2026  29.02   1.39
   JJA 2026  29.09   1.80
   JAS 2026  29.12   2.16
+  ASO 2026  29.23   2.46
